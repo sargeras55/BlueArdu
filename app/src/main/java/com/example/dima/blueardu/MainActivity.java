@@ -2,13 +2,21 @@ package com.example.dima.blueardu;
 
 
 import android.app.Activity;
+import android.app.ProgressDialog;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothSocket;
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.DialogInterface;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.pm.PackageManager;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.ParcelUuid;
 import android.support.v7.app.AppCompatActivity;
+import android.util.Log;
 import android.view.View;
 import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
@@ -29,20 +37,25 @@ public class MainActivity extends AppCompatActivity {
 
     private static final int REQUEST_ENABLE_BT = 1;
 
-    BluetoothAdapter bluetoothAdapter;
+    private BluetoothAdapter bluetoothAdapter;
 
-    ArrayList<String> pairedDeviceArrayList;
+    private ArrayList<String> pairedDeviceArrayList;
+    private TextView mTvConnectMessage;
+    private ListView listViewPairedDevice;
+    private FrameLayout ButPanel;
 
-    ListView listViewPairedDevice;
-    FrameLayout ButPanel;
-
-    ArrayAdapter<String> pairedDeviceAdapter;
+    private ArrayAdapter<String> pairedDeviceAdapter;
     private UUID myUUID;
 
-    ThreadConnectBTdevice myThreadConnectBTdevice;
-    ThreadConnected myThreadConnected;
-
+    private IntentFilter intentFilter;
+    private ThreadConnectBTdevice myThreadConnectBTdevice;
+    private ThreadConnected myThreadConnected;
+    private BroadcastReceiver mReconnector;
+    private Handler reconnectHandler;
+    private Runnable reconnectRunnable;
+    private ProgressDialog progressDialog;
     private StringBuilder sb = new StringBuilder();
+    // private static final String CLOSE_CONNECT_ACTION = "com.example.dima.blueardu.MainActivity.CLOSE_BLUETOOTH_CONNESTION";
 
     public TextView textInfo, d10, d11, d12, d13;
 
@@ -52,15 +65,31 @@ public class MainActivity extends AppCompatActivity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
-        final String UUID_STRING_WELL_KNOWN_SPP = "00001101-0000-1000-8000-00805F9B34FB";
+        final String UUID_STRING_WELL_KNOWN_SPP = "8ce255c0-200a-11e0-ac64-0800200c9a66";
 
         textInfo = (TextView)findViewById(R.id.textInfo);
         d10 = (TextView)findViewById(R.id.d10);
         d11 = (TextView)findViewById(R.id.d11);
         d12 = (TextView)findViewById(R.id.d12);
         d13 = (TextView)findViewById(R.id.d13);
-
+        mTvConnectMessage = (TextView) findViewById(R.id.tv_connect_message);
         listViewPairedDevice = (ListView)findViewById(R.id.pairedlist);
+
+        progressDialog = new ProgressDialog(this);
+        progressDialog.setMessage("Reconnect");
+        progressDialog.setCancelable(false);
+        progressDialog.setButton(DialogInterface.BUTTON_NEGATIVE, "Отмена", new DialogInterface.OnClickListener() {
+            @Override
+            public void onClick(DialogInterface dialogInterface, int i) {
+                stopReconnect();
+                if (mReconnector!=null) unregisterReceiver(mReconnector);
+                if (listViewPairedDevice.getVisibility() != View.VISIBLE) {
+                    listViewPairedDevice.setVisibility(View.VISIBLE);
+                    ButPanel.setVisibility(View.GONE);
+                }
+                mTvConnectMessage.setText("Связь разорвана");
+            }
+        });
 
         ButPanel = (FrameLayout) findViewById(R.id.ButPanel);
 
@@ -74,6 +103,9 @@ public class MainActivity extends AppCompatActivity {
 
         bluetoothAdapter = BluetoothAdapter.getDefaultAdapter();
 
+        initializeReconnectionReceiver();
+        intentFilter = new IntentFilter(BluetoothDevice.ACTION_ACL_DISCONNECTED);
+
         if (bluetoothAdapter == null) {
             Toast.makeText(this, "Bluetooth is not supported on this hardware platform", Toast.LENGTH_LONG).show();
             finish();
@@ -85,6 +117,59 @@ public class MainActivity extends AppCompatActivity {
 
     } // END onCreate
 
+
+    public void initializeReconnectionReceiver() {
+        mReconnector = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                Log.d("Logos", "onReceive " + intent.getAction());
+                String action = intent.getAction();
+                if (action.equals(BluetoothDevice.ACTION_ACL_DISCONNECTED)) {
+                    if (!progressDialog.isShowing()) {
+                        progressDialog.show();
+                        startReconnect(intent);
+                    }
+                }
+            }
+        };
+    }
+
+    public void startReconnect(final Intent intent) {
+             if (reconnectHandler != null && reconnectRunnable != null) {
+            reconnectHandler.removeCallbacks(reconnectRunnable);
+        }
+
+        reconnectHandler = new Handler();
+        reconnectRunnable = new Runnable() {
+            @Override
+            public void run() {
+                if (bluetoothAdapter != null && bluetoothAdapter.isEnabled()) {
+                    BluetoothDevice device = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
+                    if (myThreadConnected != null && myThreadConnected.isAlive()) {
+                        stopReconnect();
+                        mTvConnectMessage.setText("Success connected to " + device.getName()
+                                + " with MAC " + device.getAddress());
+                        return;
+                    }
+                    myThreadConnectBTdevice = new ThreadConnectBTdevice(device);
+                    myThreadConnectBTdevice.start();
+                    mTvConnectMessage.setText("Reconnect to " + device.getName() +
+                            " with address " + device.getAddress());
+                }
+                reconnectHandler.postDelayed(reconnectRunnable, 2000);
+            }
+        };
+        reconnectHandler.post(reconnectRunnable);
+    }
+
+    public void stopReconnect() {
+        if (reconnectHandler != null && reconnectRunnable != null) {
+            reconnectHandler.removeCallbacks(reconnectRunnable);
+        }
+        if (progressDialog != null) {
+            progressDialog.dismiss();
+        }
+    }
 
     @Override
     protected void onStart() { // Запрос на включение Bluetooth
@@ -127,6 +212,10 @@ public class MainActivity extends AppCompatActivity {
 
                     myThreadConnectBTdevice = new ThreadConnectBTdevice(device2);
                     myThreadConnectBTdevice.start();  // Запускаем поток для подключения Bluetooth
+
+                    if (intentFilter != null && mReconnector != null) {
+                        registerReceiver(mReconnector, intentFilter);
+                    }
                 }
             });
         }
@@ -135,7 +224,8 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onDestroy() { // Закрытие приложения
         super.onDestroy();
-        if(myThreadConnectBTdevice!=null) myThreadConnectBTdevice.cancel();
+        if (myThreadConnectBTdevice!=null) myThreadConnectBTdevice.cancel();
+        if (mReconnector!=null) unregisterReceiver(mReconnector);
     }
 
     @Override
@@ -158,7 +248,6 @@ public class MainActivity extends AppCompatActivity {
     private class ThreadConnectBTdevice extends Thread { // Поток для коннекта с Bluetooth
 
         private BluetoothSocket bluetoothSocket = null;
-
         private ThreadConnectBTdevice(BluetoothDevice device) {
 
             try {
@@ -173,7 +262,6 @@ public class MainActivity extends AppCompatActivity {
 
         @Override
         public void run() { // Коннект
-
             boolean success = false;
 
             try {
@@ -188,7 +276,8 @@ public class MainActivity extends AppCompatActivity {
 
                     @Override
                     public void run() {
-                        Toast.makeText(MainActivity.this, "Нет коннекта, проверьте Bluetooth-устройство с которым хотите соединица!", Toast.LENGTH_LONG).show();
+                        Toast.makeText(MainActivity.this, "Нет коннекта, проверьте Bluetooth-устройство с которым хотите соединиться!",
+                                Toast.LENGTH_SHORT).show();
                         listViewPairedDevice.setVisibility(View.VISIBLE);
                     }
                 });
@@ -203,7 +292,7 @@ public class MainActivity extends AppCompatActivity {
                 }
             }
 
-            if(success) {  // Если законнектились, тогда открываем панель с кнопками и запускаем поток приёма и отправки данных
+            if (success) {  // Если законнектились, тогда открываем панель с кнопками и запускаем поток приёма и отправки данных
 
                 runOnUiThread(new Runnable() {
 
@@ -219,7 +308,7 @@ public class MainActivity extends AppCompatActivity {
         }
 
 
-        public void cancel() {
+        void cancel() {
 
             Toast.makeText(getApplicationContext(), "Close - BluetoothSocket", Toast.LENGTH_LONG).show();
 
@@ -243,7 +332,7 @@ public class MainActivity extends AppCompatActivity {
 
         private String sbprint;
 
-        public ThreadConnected(BluetoothSocket socket) {
+        ThreadConnected(BluetoothSocket socket) {
 
             InputStream in = null;
             OutputStream out = null;
@@ -270,12 +359,14 @@ public class MainActivity extends AppCompatActivity {
                     byte[] buffer = new byte[1];
                     int bytes = connectedInputStream.read(buffer);
                     String strIncom = new String(buffer, 0, bytes);
+                    Log.d("Logos", "read " + strIncom);
                     sb.append(strIncom); // собираем символы в строку
                     int endOfLineIndex = sb.indexOf("\r\n"); // определяем конец строки
 
                     if (endOfLineIndex > 0) {
 
                         sbprint = sb.substring(0, endOfLineIndex);
+                        Log.d("Logos", "read1 " + sbprint);
                         sb.delete(0, sb.length());
 
                         runOnUiThread(new Runnable() { // Вывод данных
@@ -331,8 +422,9 @@ public class MainActivity extends AppCompatActivity {
         }
 
 
-        public void write(byte[] buffer) {
+        void write(byte[] buffer) {
             try {
+                Log.d("Logos", "read " + buffer[0]);
                 connectedOutputStream.write(buffer);
             } catch (IOException e) {
                 // TODO Auto-generated catch block
@@ -349,7 +441,7 @@ public class MainActivity extends AppCompatActivity {
 
         if(myThreadConnected!=null) {
 
-            byte[] bytesToSend = "1".getBytes();
+            byte[] bytesToSend = "hello".getBytes();
             myThreadConnected.write(bytesToSend );
         }
     }
